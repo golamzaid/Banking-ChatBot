@@ -2,8 +2,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pickle
-import gc
-from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
@@ -17,21 +15,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global variables (initially None to save startup RAM)
-db = None
-model = None
-
-def get_system():
-    global db, model
-    if db is None:
-        print("Loading Knowledge Base...")
-        with open('banking_knowledge_base.pkl', 'rb') as f:
-            db = pickle.load(f)
-    if model is None:
-        print("Loading Lightweight Model...")
-        # CPU optimization ke sath model load karein taaki RAM kam khaye
-        model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-    return db, model
+# Load Database safely on startup (Uses very low RAM)
+try:
+    with open('banking_knowledge_base.pkl', 'rb') as f:
+        db = pickle.load(f)
+    print("Database loaded successfully!")
+except Exception as e:
+    print(f"Error loading database: {e}")
 
 class ChatQuery(BaseModel):
     prompt: str
@@ -43,33 +33,36 @@ async def predict_response(query: ChatQuery):
     if not user_query:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
     
-    # Get optimized system instance
-    database, ai_model = get_system()
+    # Simple keyword/matching or if vectors exist, use them
+    # Note: If your .pkl only has vectors, we match them. 
+    # To keep it lightweight without sentence-transformers, we can do a direct text search or basic matching:
     
-    # Vector Search Logic
-    query_vector = ai_model.encode([user_query])
-    similarities = cosine_similarity(query_vector, database['vectors'])[0]
-    best_match_idx = np.argmax(similarities)
-    match_score = similarities[best_match_idx]
+    # Basic keyword search fallback to save 100% RAM and avoid heavy ML crashes
+    user_words = set(user_query.lower().split())
+    best_match_idx = 0
+    max_matches = -1
     
-    # Memory cleanup
-    gc.collect()
-    
-    if match_score < 0.45:
+    for idx, ans in enumerate(db['answers']):
+        # Simple text overlap scoring
+        ans_words = set(ans.lower().split())
+        common = len(user_words.intersection(ans_words))
+        if common > max_matches:
+            max_matches = common
+            best_match_idx = idx
+
+    if max_matches <= 0 and len(db['answers']) > 0:
         return {
             "reply": "Sorry, I don't have the exact answer to that question. Please ask in a clearer way.",
             "bank": None,
-            "category": None,
-            "score": float(match_score)
+            "category": None
         }
-    
+
     return {
-        "reply": database['answers'][best_match_idx],
-        "bank": database['banks'][best_match_idx],
-        "category": database['categories'][best_match_idx],
-        "score": float(match_score)
+        "reply": db['answers'][best_match_idx],
+        "bank": db['banks'][best_match_idx],
+        "category": db['categories'][best_match_idx]
     }
 
 @app.get("/")
 def home():
-    return {"status": "FinBot Optimized Backend is running!"}
+    return {"status": "FinBot Lightweight Backend is running!"}
